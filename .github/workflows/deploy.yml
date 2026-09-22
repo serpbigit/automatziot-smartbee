@@ -1,0 +1,32 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - name: Set Worker secrets
+        run: |
+          echo "$SMARTBEE_CLIENT_ID" | npx wrangler secret put SMARTBEE_CLIENT_ID
+          echo "$SMARTBEE_PASSWORD" | npx wrangler secret put SMARTBEE_PASSWORD
+          echo "$PROVIDERUSERTOKEN" | npx wrangler secret put PROVIDERUSERTOKEN
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SMARTBEE_CLIENT_ID: ${{ secrets.SMARTBEE_CLIENT_ID }}
+          SMARTBEE_PASSWORD: ${{ secrets.SMARTBEE_PASSWORD }}
+          PROVIDERUSERTOKEN: ${{ secrets.PROVIDERUSERTOKEN }}
+      - name: Deploy to Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
