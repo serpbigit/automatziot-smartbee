@@ -31,10 +31,19 @@ async function authenticateClient(env: SmartBeeEnv): Promise<string> {
       password: env.SMARTBEE_PASSWORD,
     }),
   });
+  const bodyText = await res.text();
   if (!res.ok) {
-    throw new Error(`SmartBee client auth failed: ${res.status} ${await res.text()}`);
+    throw new Error(`SmartBee client auth failed: ${res.status} ${bodyText}`);
   }
-  const data = (await res.json()) as AuthenticationResponse;
+  let data: AuthenticationResponse | null;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`SmartBee client auth returned non-JSON body: ${bodyText}`);
+  }
+  if (!data?.token) {
+    throw new Error(`SmartBee client auth response missing token: ${bodyText}`);
+  }
   return data.token;
 }
 
@@ -47,10 +56,21 @@ async function authenticateUser(env: SmartBeeEnv, clientToken: string): Promise<
     },
     body: JSON.stringify({ providerUserToken: env.PROVIDERUSERTOKEN }),
   });
+  const bodyText = await res.text();
   if (!res.ok) {
-    throw new Error(`SmartBee user auth failed: ${res.status} ${await res.text()}`);
+    throw new Error(`SmartBee user auth failed: ${res.status} ${bodyText}`);
   }
-  const data = (await res.json()) as SmartBeeApiResponse<SBUserLoginTokenResponse>;
+  let data: SmartBeeApiResponse<SBUserLoginTokenResponse> | null;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`SmartBee user auth returned non-JSON body: ${bodyText}`);
+  }
+  if (!data?.result?.token) {
+    throw new Error(
+      `SmartBee user auth response missing result.token (resultCodeId=${data?.resultCodeId}): ${bodyText}`,
+    );
+  }
   return data.result.token;
 }
 
@@ -77,9 +97,20 @@ export async function createSmartBeeDocument(
     body: JSON.stringify(fullRequest),
   });
 
-  const data = (await res.json()) as SmartBeeApiResponse<SmartBeeDocumentCreateResponse>;
+  const bodyText = await res.text();
   if (!res.ok) {
-    throw new Error(`SmartBee document creation failed: ${res.status} ${JSON.stringify(data)}`);
+    throw new Error(`SmartBee document creation failed: ${res.status} ${bodyText}`);
+  }
+  let data: SmartBeeApiResponse<SmartBeeDocumentCreateResponse> | null;
+  try {
+    data = JSON.parse(bodyText);
+  } catch {
+    throw new Error(`SmartBee document creation returned non-JSON body: ${bodyText}`);
+  }
+  if (!data?.result) {
+    throw new Error(
+      `SmartBee document creation missing result (resultCodeId=${data?.resultCodeId}): ${bodyText}`,
+    );
   }
   return data.result;
 }
