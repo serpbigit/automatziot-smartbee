@@ -25,6 +25,22 @@ export default {
 
     const url = new URL(request.url);
 
+    // TEMPORARY — remove once secret corruption is ruled out. Never returns
+    // the actual secret values, only length/whitespace metadata.
+    if (url.pathname === "/debug/secrets") {
+      const describe = (v: string | undefined) => ({
+        present: typeof v === "string" && v.length > 0,
+        length: v?.length ?? 0,
+        hasLeadingWhitespace: !!v && v !== v.trimStart(),
+        hasTrailingWhitespace: !!v && v !== v.trimEnd(),
+      });
+      return Response.json({
+        SMARTBEE_CLIENT_ID: describe(env.SMARTBEE_CLIENT_ID),
+        SMARTBEE_PASSWORD: describe(env.SMARTBEE_PASSWORD),
+        PROVIDERUSERTOKEN: describe(env.PROVIDERUSERTOKEN),
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/documents") {
       const body = (await request.json()) as SmartBeeDocumentRequest;
       try {
