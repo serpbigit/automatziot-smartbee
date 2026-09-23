@@ -1,7 +1,9 @@
-﻿import { createSmartBeeDocument, getDocumentStatus, type DocumentInput, type SmartBeeEnv } from "./smartbee-client";
+import { handleMcp } from "./mcp";
+import { createSmartBeeDocument, getDocumentStatus, type DocumentInput, type SmartBeeEnv } from "./smartbee-client";
 
 export interface Env extends SmartBeeEnv {
   LICENSE_KEY?: string;
+  MCP_TOKEN?: string;
 }
 
 async function isLicenseValid(env: Env): Promise<boolean> {
@@ -23,6 +25,10 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    // MCP endpoint for Claude custom connector: /mcp/<MCP_TOKEN>
+    const mcp = url.pathname.match(/^\/mcp\/([^/]+)$/);
+    if (mcp) return handleMcp(request, env, mcp[1]);
 
     try {
       // Create a document (e.g. docType "PriceProposal"); polls up to ~20s.
