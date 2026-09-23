@@ -23,7 +23,7 @@ export interface SmartBeeEnv {
 }
 
 /** What callers send. Provider IDs are optional; they are generated if missing. */
-export type DocumentInput = Omit
+export type DocumentInput = Omit<
   DocumentRequest,
   "providerUserToken" | "providerMsgId" | "providerMsgReferenceId"
 > &
