@@ -12,14 +12,15 @@ import {
 } from "./smartbee-client";
 import type { Customer, DocumentType, PaymentItem, ReceiptDetailsRequest } from "./types/smartbee";
 
-const SERVER_INFO = { name: "automatziot-smartbee", version: "0.5.0" };
+const SERVER_INFO = { name: "automatziot-smartbee", version: "0.5.1" };
 const DEFAULT_PROTOCOL = "2025-06-18";
 
 const INSTRUCTIONS =
   "SmartBee accounting connector (Automatziot). Creates quotes and receipts, finds documents, closes quotes, " +
   "and summarizes income and expenses in the user's SmartBee account. When the user asks what you can do with SmartBee, " +
   "call list_capabilities. Always confirm details before create_quote, create_receipt or mark_handled. " +
-  "A business card photo can be used as the source of customer details.";
+  "A business card photo can be used as the source of customer details. " +
+  "Always reply in the same language the user writes or speaks in (e.g. Hebrew or English), even though tool results are in English.";
 
 const CAPABILITIES = {
   title: "מה אפשר לעשות עם SmartBee דרך Claude",
