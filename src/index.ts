@@ -1,5 +1,4 @@
-import { createSmartBeeDocument, type SmartBeeEnv } from "./smartbee-client";
-import type { SmartBeeDocumentRequest } from "./types/smartbee";
+﻿import { createSmartBeeDocument, getDocumentStatus, type DocumentInput, type SmartBeeEnv } from "./smartbee-client";
 
 export interface Env extends SmartBeeEnv {
   LICENSE_KEY?: string;
@@ -12,7 +11,7 @@ async function isLicenseValid(env: Env): Promise<boolean> {
     });
     return response.status !== 402;
   } catch {
-    // Endpoint doesn't exist yet — allow through so testing isn't blocked.
+    // Endpoint doesn't exist yet - allow through so testing isn't blocked.
     return true;
   }
 }
@@ -25,14 +24,20 @@ export default {
 
     const url = new URL(request.url);
 
-    if (request.method === "POST" && url.pathname === "/documents") {
-      const body = (await request.json()) as SmartBeeDocumentRequest;
-      try {
-        const result = await createSmartBeeDocument(env, body);
-        return Response.json(result);
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 502 });
+    try {
+      // Create a document (e.g. docType "PriceProposal"); polls up to ~20s.
+      if (request.method === "POST" && url.pathname === "/documents") {
+        const body = (await request.json()) as DocumentInput;
+        return Response.json(await createSmartBeeDocument(env, body));
       }
+
+      // Check a pending document by SmartBee message ID.
+      const m = url.pathname.match(/^\/documents\/([^/]+)$/);
+      if (request.method === "GET" && m) {
+        return Response.json(await getDocumentStatus(env, decodeURIComponent(m[1])));
+      }
+    } catch (err) {
+      return Response.json({ error: (err as Error).message }, { status: 502 });
     }
 
     return new Response("Automatziot SmartBee Worker is running.", {
