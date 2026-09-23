@@ -11,14 +11,19 @@ import {
   type SmartBeeEnv,
 } from "./smartbee-client";
 import type { Customer, DocumentType, PaymentItem, ReceiptDetailsRequest } from "./types/smartbee";
+import type { DocumentInput } from "./smartbee-client";
 
-const SERVER_INFO = { name: "automatziot-smartbee", version: "0.5.1" };
+type McpEnv = SmartBeeEnv & { MCP_TOKEN?: string };
+
+const SERVER_INFO = { name: "automatziot-smartbee", version: "0.6.0" };
 const DEFAULT_PROTOCOL = "2025-06-18";
 
 const INSTRUCTIONS =
   "SmartBee accounting connector (Automatziot). Creates quotes and receipts, finds documents, closes quotes, " +
   "and summarizes income and expenses in the user's SmartBee account. When the user asks what you can do with SmartBee, " +
-  "call list_capabilities. Always confirm details before create_quote, create_receipt or mark_handled. " +
+  "call list_capabilities. create_quote and create_receipt are two-step: the first call only returns a preview and a " +
+  "confirmation_code; show the full preview to the user and call again with the code ONLY after the user explicitly approves. " +
+  "Confirm with the user before mark_handled. " +
   "A business card photo can be used as the source of customer details. " +
   "Always reply in the same language the user writes or speaks in (e.g. Hebrew or English), even though tool results are in English.";
 
@@ -51,7 +56,9 @@ const TOOLS = [
     description:
       "Create a price quote (hatzaat mechir) in SmartBee for a customer. If the customer does not exist yet, " +
       "SmartBee creates them automatically from these details. Returns the quote number and PDF links. " +
-      "Before calling, confirm the customer details and line items with the user.",
+      "TWO-STEP: call first WITHOUT confirmation_code - nothing is created, you get a preview and a confirmation_code. " +
+      "Show the full preview to the user. Only after the user explicitly approves, call again with IDENTICAL arguments plus confirmation_code. " +
+      "Never confirm on the user's behalf. Codes expire after 10 minutes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -79,6 +86,7 @@ const TOOLS = [
           type: "boolean",
           description: "Email the quote PDF to the customer. Default false. Only true if the user explicitly asks to send it.",
         },
+        confirmation_code: { type: "string", description: "Only on the second call, after the user approved the preview" },
       },
       required: ["customer_name", "items"],
     },
@@ -111,7 +119,10 @@ const TOOLS = [
     description:
       "Issue a receipt (kabala) in SmartBee for a payment already received. This is an official tax document with a running " +
       "number and cannot be deleted, so ALWAYS show the customer, amount, payment method and date to the user and get explicit " +
-      "confirmation first. Creates the customer automatically if new.",
+      "confirmation first. Creates the customer automatically if new. " +
+      "TWO-STEP: call first WITHOUT confirmation_code - nothing is created, you get a preview and a confirmation_code. " +
+      "Show the full preview to the user. Only after the user explicitly approves, call again with IDENTICAL arguments plus confirmation_code. " +
+      "Never confirm on the user's behalf. Codes expire after 10 minutes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -131,6 +142,7 @@ const TOOLS = [
         bank_account: { type: "string", description: "bank_transfer / check: account number" },
         reference: { type: "string", description: "bank_transfer: reference number; check: check number" },
         send_to_customer: { type: "boolean", description: "Email the receipt to the customer. Default false." },
+        confirmation_code: { type: "string", description: "Only on the second call, after the user approved the preview" },
       },
       required: ["customer_name", "amount", "payment_method"],
     },
@@ -199,32 +211,9 @@ interface QuoteArgs {
   send_to_customer?: boolean;
 }
 
-async function callTool(env: SmartBeeEnv, name: string, args: Record<string, unknown>): Promise<unknown> {
+async function callTool(env: McpEnv, name: string, args: Record<string, unknown>): Promise<unknown> {
   if (name === "list_capabilities") return CAPABILITIES;
-  if (name === "create_quote") {
-    const a = args as unknown as QuoteArgs;
-    const customer: Customer = {
-      name: a.customer_name,
-      providerCustomerId: a.customer_email?.trim().toLowerCase() || undefined,
-      email: a.customer_email || undefined,
-      mainPhone: a.customer_phone || undefined,
-      address: a.customer_address || undefined,
-      cityName: a.customer_city || undefined,
-    };
-    const paymentItems: PaymentItem[] = (a.items ?? []).map((i) => ({
-      description: i.description,
-      quantity: i.quantity,
-      pricePerUnit: i.price,
-      vatOption: i.vat_included === false ? "NotInclude" : "Include",
-    }));
-    return createSmartBeeDocument(env, {
-      docType: "PriceProposal",
-      customer,
-      documentItems: { paymentItems },
-      comments: a.comments,
-      creationMetadata: { sendOriginalToCustomer: a.send_to_customer === true },
-    });
-  }
+  if (name === "create_quote") return confirmFlow(env, "create_quote", args, buildQuoteInput(args as any));
   if (name === "search_documents") {
     const results = await searchDocuments(env, {
       customerName: args.customer_name as string | undefined,
@@ -236,7 +225,7 @@ async function callTool(env: SmartBeeEnv, name: string, args: Record<string, unk
     });
     return results.length ? results : { results: [], note: "No matching documents found." };
   }
-  if (name === "create_receipt") return createReceipt(env, args);
+  if (name === "create_receipt") return confirmFlow(env, "create_receipt", args, buildReceiptInput(args as any));
   if (name === "mark_handled") {
     const id = await findDocumentId(env, Number(args.document_number), args.doc_type as DocumentType | undefined);
     return setDocumentHandled(env, id, args.handled !== false);
@@ -265,12 +254,119 @@ const monthStart = () => {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 };
 
+// ---------- Quote builder ----------
+function buildQuoteInput(a: QuoteArgs): DocumentInput {
+  if (!a.customer_name || String(a.customer_name).trim().length < 2) throw new Error("customer_name is required (2-100 chars)");
+  if (!Array.isArray(a.items) || a.items.length === 0) throw new Error("at least one item is required");
+  const customer: Customer = {
+    name: String(a.customer_name).trim(),
+    providerCustomerId: a.customer_email?.trim().toLowerCase() || undefined,
+    email: a.customer_email?.trim() || undefined,
+    mainPhone: a.customer_phone || undefined,
+    address: a.customer_address || undefined,
+    cityName: a.customer_city || undefined,
+  };
+  const paymentItems: PaymentItem[] = a.items.map((i) => ({
+    description: String(i.description),
+    quantity: Number(i.quantity),
+    pricePerUnit: Number(i.price),
+    vatOption: i.vat_included === false ? "NotInclude" : "Include",
+  }));
+  return {
+    docType: "PriceProposal",
+    customer,
+    documentItems: { paymentItems },
+    comments: a.comments || undefined,
+    creationMetadata: { sendOriginalToCustomer: a.send_to_customer === true },
+  };
+}
+
+// ---------- Two-step confirmation (enforced server-side, independent of client permissions) ----------
+const CONFIRM_TTL_SEC = 600;
+const DOC_LABELS: Record<string, string> = { PriceProposal: "הצעת מחיר", Receipt: "קבלה" };
+
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
+  if (v && typeof v === "object") {
+    return "{" + Object.keys(v as object).sort()
+      .filter((k) => (v as any)[k] !== undefined)
+      .map((k) => JSON.stringify(k) + ":" + canonical((v as any)[k])).join(",") + "}";
+  }
+  return JSON.stringify(v);
+}
+
+async function hmacHex(key: string, data: string): Promise<string> {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function buildPreview(input: DocumentInput) {
+  const items = input.documentItems?.paymentItems ?? [];
+  const r = input.receiptDetails ?? {};
+  const payments = [
+    ...(r.cashItems ?? []).map((x) => ({ method: "מזומן", sum: x.sum, date: x.date })),
+    ...(r.otherItems ?? []).map((x) => ({ method: x.description, sum: x.sum, date: x.date })),
+    ...(r.creditCardItems ?? []).map((x) => ({ method: `אשראי ${x.cardNumber}`, sum: x.sum, date: x.date })),
+    ...(r.wireTransferItems ?? []).map((x) => ({ method: `העברה בנקאית ${x.referenceNum}`, sum: x.sum, date: x.date })),
+    ...(r.checkItems ?? []).map((x) => ({ method: `צ'ק ${x.checkId}`, sum: x.sum, date: x.date })),
+  ];
+  const send = input.creationMetadata?.sendOriginalToCustomer === true;
+  return {
+    document: DOC_LABELS[input.docType] ?? input.docType,
+    customer: { name: input.customer.name, email: input.customer.email, phone: input.customer.mainPhone },
+    items: items.length
+      ? items.map((i) => ({ description: i.description, quantity: i.quantity, price: i.pricePerUnit, line_total: i.quantity * i.pricePerUnit, vat: i.vatOption }))
+      : undefined,
+    items_total: items.length ? items.reduce((s, i) => s + i.quantity * i.pricePerUnit, 0) : undefined,
+    payments: payments.length ? payments : undefined,
+    comments: input.comments,
+    email_to_customer: send ? `כן - יישלח אל ${input.customer.email ?? "(אין מייל ללקוח!)"}` : "לא",
+    note: "VAT is applied according to the business settings in SmartBee.",
+  };
+}
+
+async function confirmFlow(env: McpEnv, tool: string, args: Record<string, unknown>, input: DocumentInput) {
+  if (!env.MCP_TOKEN) throw new Error("Server not configured (MCP_TOKEN missing)");
+  if (input.creationMetadata?.sendOriginalToCustomer && !input.customer.email) {
+    throw new Error("send_to_customer is true but customer_email is missing");
+  }
+  const canon = canonical({ tool, input });
+  const code = typeof args.confirmation_code === "string" ? args.confirmation_code.trim() : "";
+
+  if (!code) {
+    const exp = Math.floor(Date.now() / 1000) + CONFIRM_TTL_SEC;
+    const sig = (await hmacHex(env.MCP_TOKEN, `${exp}|${canon}`)).slice(0, 20);
+    return {
+      status: "preview_only_nothing_created",
+      preview: buildPreview(input),
+      confirmation_code: `${exp}-${sig}`,
+      expires_in_minutes: CONFIRM_TTL_SEC / 60,
+      next_step:
+        "Show this full preview to the user and ask for explicit approval. Only if they approve, call the same tool again " +
+        "with IDENTICAL arguments plus this confirmation_code. If they want changes, call again WITHOUT a code to get a new preview.",
+    };
+  }
+
+  const [expStr, sig] = code.split("-");
+  const exp = Number(expStr);
+  if (!exp || !sig) throw new Error("Invalid confirmation_code. Request a new preview (call without confirmation_code).");
+  if (Date.now() / 1000 > exp) throw new Error("confirmation_code expired. Request a new preview and ask the user again.");
+  const full = await hmacHex(env.MCP_TOKEN, `${exp}|${canon}`);
+  if (full.slice(0, 20) !== sig) {
+    throw new Error("Details differ from the approved preview. Request a new preview and ask the user to approve it.");
+  }
+  // Deterministic idempotency key: retrying the same confirmed request cannot create a duplicate document.
+  return createSmartBeeDocument(env, { ...input, providerMsgId: `am-${full.slice(0, 32)}` });
+}
+
 const OTHER_LABELS: Record<string, string> = { bit: "Bit", paybox: "PayBox", other: "Other" };
 
-async function createReceipt(env: SmartBeeEnv, a: Record<string, any>) {
+function buildReceiptInput(a: Record<string, any>): DocumentInput {
   const amount = Number(a.amount);
   if (!(amount > 0)) throw new Error("amount must be a positive number");
-  const date = a.payment_date ? new Date(a.payment_date).toISOString() : new Date().toISOString();
+  // Default = today (date only) so the preview and the confirm call produce the same request.
+  const date = a.payment_date ? new Date(a.payment_date).toISOString() : new Date().toISOString().slice(0, 10) + "T00:00:00.000Z";
   const method = String(a.payment_method);
   const need = (...keys: string[]) => {
     const missing = keys.filter((k) => !a[k]);
@@ -323,13 +419,13 @@ async function createReceipt(env: SmartBeeEnv, a: Record<string, any>) {
     mainPhone: a.customer_phone || undefined,
   };
 
-  return createSmartBeeDocument(env, {
+  return {
     docType: "Receipt",
     customer,
     receiptDetails,
-    comments: a.description,
+    comments: a.description || undefined,
     creationMetadata: { sendOriginalToCustomer: a.send_to_customer === true },
-  });
+  };
 }
 
 type RpcMsg = { jsonrpc: "2.0"; id?: string | number | null; method?: string; params?: any };
@@ -337,7 +433,7 @@ type RpcMsg = { jsonrpc: "2.0"; id?: string | number | null; method?: string; pa
 const rpcResult = (id: RpcMsg["id"], result: unknown) => ({ jsonrpc: "2.0", id, result });
 const rpcError = (id: RpcMsg["id"], code: number, message: string) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
-async function handleRpc(env: SmartBeeEnv, msg: RpcMsg): Promise<object | null> {
+async function handleRpc(env: McpEnv, msg: RpcMsg): Promise<object | null> {
   const id = msg.id ?? null;
   const isNotification = msg.id === undefined;
   switch (msg.method) {
