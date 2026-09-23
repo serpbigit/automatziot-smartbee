@@ -15,17 +15,21 @@ import type { DocumentInput } from "./smartbee-client";
 
 type McpEnv = SmartBeeEnv & { MCP_TOKEN?: string };
 
-const SERVER_INFO = { name: "automatziot-smartbee", version: "0.6.0" };
+const SERVER_INFO = { name: "automatziot-smartbee", version: "0.7.0" };
 const DEFAULT_PROTOCOL = "2025-06-18";
 
-const INSTRUCTIONS =
-  "SmartBee accounting connector (Automatziot). Creates quotes and receipts, finds documents, closes quotes, " +
-  "and summarizes income and expenses in the user's SmartBee account. When the user asks what you can do with SmartBee, " +
-  "call list_capabilities. create_quote and create_receipt are two-step: the first call only returns a preview and a " +
-  "confirmation_code; show the full preview to the user and call again with the code ONLY after the user explicitly approves. " +
-  "Confirm with the user before mark_handled. " +
-  "A business card photo can be used as the source of customer details. " +
-  "Always reply in the same language the user writes or speaks in (e.g. Hebrew or English), even though tool results are in English.";
+const INSTRUCTIONS = [
+  "SmartBee accounting connector (Automatziot). Creates quotes and receipts in the user's SmartBee account, finds documents, closes quotes, and summarizes income and expenses.",
+  "LANGUAGE: always reply in the language the user writes or speaks in, even though tool results are in English. Show customer names, emails, amounts and document numbers exactly as they are.",
+  "WHAT CAN YOU DO: when asked what you can do with SmartBee, call list_capabilities (default detail='intro'), present the intro and ask its follow-up question. Only call with detail='full' if the user wants the full list.",
+  "SOURCES (read-only): customer details may come from any connected source - a business card photo, an email, a Drive file, or the conversation. From a business card extract full name, email, phone, address, city. If something is unclear or handwritten illegibly, say what is unclear - never guess. If a requested source is not connected, say so simply and offer to paste, photograph or dictate the details.",
+  "SENDING: documents are emailed to the customer only by SmartBee itself (send_to_customer). Never send documents through another email connector.",
+  "CONFIRMATION: create_quote and create_receipt are two-step. The first call only returns a preview - present it clearly and ask the user using the ask_user text in the result (in the user's language). Proceed with confirmation_code ONLY after an explicit approval such as yes / send / approve / ok / continue (Hebrew: כן, שלח, שגר, אשר, זה בסדר, המשך). A correction means a new preview. An unclear answer or a question is NOT approval. Never approve on the user's behalf.",
+  "RECEIPTS are official documents that cannot be deleted - double-check amount, payment method and customer name in the preview. For bank transfer or check, ask for bank, branch, account and reference if missing.",
+  "Before mark_handled, tell the user which document (number, customer, total) and ask for approval.",
+  "AFTER SUCCESS: reply briefly with document type, number, customer, amount and whether it was emailed; include the PDF link; if the result contains whatsapp_link, offer it using whatsapp_offer_text.",
+  "ERRORS: explain in plain words what went wrong and what is needed. Do not retry without asking the user.",
+].join(" ");
 
 const CAPABILITIES = {
   title: "מה אפשר לעשות עם SmartBee דרך Claude",
@@ -43,13 +47,31 @@ const CAPABILITIES = {
   privacy: "החיבור רץ בחשבון Cloudflare של העסק. לספק החיבור (Automatziot) אין גישה למסמכים או לפרטי הלקוחות.",
 };
 
+const CAPABILITIES_INTRO = {
+  intro:
+    "אני מחובר לחשבון ה-SmartBee שלך ויכול להפיק עבורך מסמכים ולשלוף מידע - בדיבור או בכתיבה. " +
+    "אפשר גם לקחת פרטים ממקור אחר שמחובר אליי ולהעביר אותם ישירות ל-SmartBee.",
+  examples: [
+    "צילמתי כרטיס ביקור - תכין לו הצעת מחיר לשעת ייעוץ ב-300 ותשלח לו",
+    "קח את פרטי הקשר מהמייל האחרון של דנה ותכין לה הצעת מחיר",
+    "מה הצעת המחיר האחרונה ששלחתי?",
+  ],
+  follow_up_question: "תרצה לראות את רשימת הפעולות המלאה, או שתגיד לי ישר מה לבצע?",
+  guidance: "Present intro, examples and follow_up_question in the user's language. Call again with detail='full' only if asked.",
+};
+
 const TOOLS = [
   {
     name: "list_capabilities",
     description:
       "List everything this SmartBee connector can do, with example phrases (Hebrew). Call this when the user asks " +
       "what you can help with in SmartBee / accounting / quotes. Read-only.",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: {
+      type: "object",
+      properties: {
+        detail: { type: "string", enum: ["intro", "full"], description: "intro (default) = short intro + follow-up question; full = complete list" },
+      },
+    },
   },
   {
     name: "create_quote",
@@ -212,7 +234,7 @@ interface QuoteArgs {
 }
 
 async function callTool(env: McpEnv, name: string, args: Record<string, unknown>): Promise<unknown> {
-  if (name === "list_capabilities") return CAPABILITIES;
+  if (name === "list_capabilities") return args.detail === "full" ? CAPABILITIES : CAPABILITIES_INTRO;
   if (name === "create_quote") return confirmFlow(env, "create_quote", args, buildQuoteInput(args as any));
   if (name === "search_documents") {
     const results = await searchDocuments(env, {
@@ -342,6 +364,8 @@ async function confirmFlow(env: McpEnv, tool: string, args: Record<string, unkno
       preview: buildPreview(input),
       confirmation_code: `${exp}-${sig}`,
       expires_in_minutes: CONFIRM_TTL_SEC / 60,
+      ask_user: `הכנתי את ${DOC_LABELS[input.docType] === "קבלה" ? "הקבלה" : "הצעת המחיר"}. תעבור רגע על הפרטים - ` +
+        (input.creationMetadata?.sendOriginalToCustomer ? "אם הכול נכון, תגיד 'שלח' ואשלח ללקוח." : "אם הכול נכון, תגיד 'אשר' ואפיק את המסמך."),
       next_step:
         "Show this full preview to the user and ask for explicit approval. Only if they approve, call the same tool again " +
         "with IDENTICAL arguments plus this confirmation_code. If they want changes, call again WITHOUT a code to get a new preview.",
@@ -357,7 +381,32 @@ async function confirmFlow(env: McpEnv, tool: string, args: Record<string, unkno
     throw new Error("Details differ from the approved preview. Request a new preview and ask the user to approve it.");
   }
   // Deterministic idempotency key: retrying the same confirmed request cannot create a duplicate document.
-  return createSmartBeeDocument(env, { ...input, providerMsgId: `am-${full.slice(0, 32)}` });
+  const outcome = await createSmartBeeDocument(env, { ...input, providerMsgId: `am-${full.slice(0, 32)}` });
+  return withWhatsApp(outcome, input);
+}
+
+function toIntlPhone(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  let d = raw.replace(/\D/g, "");
+  if (d.startsWith("00")) d = d.slice(2);
+  if (d.startsWith("0")) d = "972" + d.slice(1);
+  else if (d.length === 9 && d.startsWith("5")) d = "972" + d;
+  return d.length >= 11 && d.length <= 15 ? d : undefined;
+}
+
+function withWhatsApp(outcome: any, input: DocumentInput) {
+  const link: string | undefined = outcome?.document?.linkToOriginal;
+  const phone = toIntlPhone(input.customer.mainPhone);
+  if (outcome?.status !== "created" || !link || !phone) return outcome;
+  const first = String(input.customer.name).trim().split(/\s+/)[0];
+  const sent = input.creationMetadata?.sendOriginalToCustomer === true;
+  const what = input.docType === "Receipt" ? "לקבלה על התשלום" : "להצעת המחיר שדיברנו עליה";
+  const text = `שלום ${first}, מצורף קישור ${what}: ${link}` + (sent ? " לנוחיותך, המסמך נשלח גם למייל שלך." : "");
+  return {
+    ...outcome,
+    whatsapp_link: `https://wa.me/${phone}?text=${encodeURIComponent(text)}`,
+    whatsapp_offer_text: "הכנתי לך גם קישור לשליחה בוואטסאפ:",
+  };
 }
 
 const OTHER_LABELS: Record<string, string> = { bit: "Bit", paybox: "PayBox", other: "Other" };
