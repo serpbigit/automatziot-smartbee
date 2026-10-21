@@ -1,9 +1,11 @@
 import { handleMcp } from "./mcp";
+import { handleReceipt, requireKey } from "./receipt";
 import { createSmartBeeDocument, getDocumentStatus, type DocumentInput, type SmartBeeEnv } from "./smartbee-client";
 
 export interface Env extends SmartBeeEnv {
   LICENSE_KEY?: string;
   MCP_TOKEN?: string;
+  SMARTBEE_RECEIPT_KEY?: string;
 }
 
 async function isLicenseValid(env: Env): Promise<boolean> {
@@ -29,6 +31,15 @@ export default {
     // MCP endpoint for Claude custom connector: /mcp/<MCP_TOKEN>
     const mcp = url.pathname.match(/^\/mcp\/([^/]+)$/);
     if (mcp) return handleMcp(request, env, mcp[1]);
+
+    // Site endpoint: one simple receipt request after a confirmed payment (x-api-key required).
+    if (url.pathname === "/receipt") return handleReceipt(request, env);
+
+    // Everything below needs the key as well.
+    if (url.pathname === "/documents" || url.pathname.startsWith("/documents/")) {
+      const denied = await requireKey(request, env);
+      if (denied) return denied;
+    }
 
     try {
       // Create a document (e.g. docType "PriceProposal"); polls up to ~20s.

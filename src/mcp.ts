@@ -411,7 +411,7 @@ function withWhatsApp(outcome: any, input: DocumentInput) {
 
 const OTHER_LABELS: Record<string, string> = { bit: "Bit", paybox: "PayBox", other: "Other" };
 
-function buildReceiptInput(a: Record<string, any>): DocumentInput {
+export function buildReceiptInput(a: Record<string, any>): DocumentInput {
   const amount = Number(a.amount);
   if (!(amount > 0)) throw new Error("amount must be a positive number");
   // Default = today (date only) so the preview and the confirm call produce the same request.
