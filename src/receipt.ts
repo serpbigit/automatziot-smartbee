@@ -3,6 +3,8 @@ import { buildReceiptInput } from "./mcp";
 
 export interface ReceiptEnv extends SmartBeeEnv {
   SMARTBEE_RECEIPT_KEY?: string;
+  /** Set to "1" to make every receipt a draft: nothing official is issued, nothing is emailed. */
+  SMARTBEE_FORCE_DRAFT?: string;
 }
 
 const json = (body: unknown, status: number) => Response.json(body, { status });
@@ -49,6 +51,11 @@ export async function handleReceipt(request: Request, env: ReceiptEnv): Promise<
     const input = buildReceiptInput(body);
     input.providerMsgId = await msgIdFor(orderId);
     input.providerMsgReferenceId = `order-${orderId}`.slice(0, 60);
+    const draft = env.SMARTBEE_FORCE_DRAFT === "1" || body.draft === true;
+    if (draft) {
+      input.isDraft = true;
+      input.creationMetadata = { ...(input.creationMetadata ?? {}), sendOriginalToCustomer: false };
+    }
     const out = await createSmartBeeDocument(env, input);
     switch (out.status) {
       case "created":
@@ -62,14 +69,14 @@ export async function handleReceipt(request: Request, env: ReceiptEnv): Promise<
           },
           201,
         );
+      case "draft":
+        return json({ status: "draft", draft_document_id: out.document.draftDocumentId, note: "Saved as a draft in SmartBee, nothing was issued or emailed" }, 201);
       case "duplicate":
         return json({ status: "duplicate", message: "A receipt for this order_id was already requested" }, 200);
       case "pending":
         return json({ status: "pending", msg_id: out.msgId }, 202);
       case "error":
         return json({ status: "error", result_code: out.resultCodeId, validation_errors: out.validationErrors }, 422);
-      default:
-        return json({ status: out.status }, 200);
     }
   } catch (err) {
     return json({ error: (err as Error).message }, 400);
