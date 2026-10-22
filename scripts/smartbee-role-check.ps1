@@ -2,7 +2,7 @@
 # Prompts for the three API values, never prints them or the login token. Creates NOTHING:
 # the request is a draft and is expected to be refused if the API role is missing.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\scripts\smartbee-role-check.ps1
-param([string]$Base = 'https://smartbee.co.il/api/v1')
+param([string]$Base = 'https://smartbee.co.il/api/v1', [string]$Poll = '')
 
 function Plain($s) { [Net.NetworkCredential]::new('', $s).Password }
 function Call($method, $url, $headers, $body) {
@@ -22,7 +22,8 @@ function Call($method, $url, $headers, $body) {
 
 $clientId = Read-Host 'API client id'
 $password = Plain (Read-Host 'API password' -AsSecureString)
-$provider = Plain (Read-Host 'provider user token' -AsSecureString)
+$provider = ''
+if (-not $Poll) { $provider = Plain (Read-Host 'provider user token' -AsSecureString) }
 
 Write-Host ''
 Write-Host "Time (UTC): $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
@@ -35,6 +36,24 @@ Write-Host "  HTTP $($login.code)"
 $token = $null
 try { $token = ($login.text | ConvertFrom-Json).token } catch {}
 if ($token) { Write-Host '  Login OK (token received, not shown)' } else { Write-Host "  Login FAILED: $($login.text)"; return }
+
+function Show-Status($id) {
+  Write-Host ''
+  Write-Host "STEP 3: GET /documents/$id (what SmartBee finally did with the request)"
+  for ($i = 1; $i -le 4; $i++) {
+    Start-Sleep -Seconds 3
+    $st = Call 'GET' "$Base/documents/$id" @{ Authorization = "Bearer $token" } $null
+    Write-Host "  try ${i}: HTTP $($st.code)  $($st.text)"
+    if ($st.text -notmatch '"resultCodeId":10[23]') { break }
+  }
+}
+
+if ($Poll) {
+  Show-Status $Poll
+  Write-Host ''
+  Write-Host 'Send this output to SmartBee support. Nothing in it is secret.'
+  return
+}
 
 Write-Host ''
 Write-Host 'STEP 2: POST /documents/create (draft receipt, 1 ILS, test customer)'
@@ -50,5 +69,8 @@ $create = Call 'POST' "$Base/documents/create" @{ Authorization = "Bearer $token
 Write-Host "  providerMsgId: $msgId"
 Write-Host "  HTTP $($create.code)"
 Write-Host "  Reply: $($create.text)"
+$newId = $null
+try { $newId = ($create.text | ConvertFrom-Json).result } catch {}
+if ($newId -and $create.text -match '"resultCodeId":101') { Show-Status $newId }
 Write-Host ''
 Write-Host 'Send this output to SmartBee support. Nothing in it is secret.'
